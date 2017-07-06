@@ -23,6 +23,43 @@ def parse_arguments():
         description='Synthesize an observed sky map',
         fromfile_prefix_chars='@')
 
+    parser.add_argument('--debug',
+                        required=False, default=False, action='store_true',
+                        help='Output debugging information')
+
+    parser.add_argument('--noise_tt_sigma', required=False, type=np.float,
+                        help='TT white noise level [uK-arcmin]')
+
+    parser.add_argument('--noise_tt_knee', required=False, type=np.float,
+                        help='TT noise knee multipole')
+
+    parser.add_argument('--noise_tt_slope', required=False, type=np.float,
+                        help='TT noise slope')
+
+    parser.add_argument('--noise_ee_sigma', required=False, type=np.float,
+                        help='EE white noise level [uK-arcmin]')
+
+    parser.add_argument('--noise_ee_knee', required=False, type=np.float,
+                        help='EE noise knee multipole')
+
+    parser.add_argument('--noise_ee_slope', required=False, type=np.float,
+                        help='EE noise slope')
+
+    parser.add_argument('--noise_bb_sigma', required=False, type=np.float,
+                        help='BB white noise level [uK-arcmin]')
+
+    parser.add_argument('--noise_bb_knee', required=False, type=np.float,
+                        help='BB noise knee multipole')
+
+    parser.add_argument('--noise_bb_slope', required=False, type=np.float,
+                        help='BB noise slope')
+
+    parser.add_argument('--hit', required=False,
+                        help='Proportional hitmap')
+
+    parser.add_argument('--hit_coord', required=False, default='G',
+                        help='hitmap coordinate system')
+
     parser.add_argument('--cmb_scalar', required=False,
                         help='Scalar CMB Alm expansion file')
 
@@ -44,6 +81,9 @@ def parse_arguments():
     parser.add_argument('--fg_coord', required=False, default='G',
                         help='Foreground coordinate system')
 
+    parser.add_argument('--lmin', required=False, type=np.int,
+                        help='Minimum ell to consider')
+
     parser.add_argument('--lmax', required=False, type=np.int,
                         help='Maximum ell to consider')
 
@@ -53,9 +93,9 @@ def parse_arguments():
     parser.add_argument('--nside', required=True, type=np.int,
                         help='Resolution of the output map')
 
-    parser.add_argument('--output_map', required=False,
-                        default='total_map.fits.gz',
-                        help='Name of the output map')
+    parser.add_argument('--output', required=False,
+                        default='simulation',
+                        help='Root name for all outputs')
 
     parser.add_argument('--output_coord', required=False, default='G',
                         help='Output coordinate system')
@@ -75,6 +115,89 @@ def parse_arguments():
                            ''.format(args.output_coord))
 
     return args
+
+
+def read_noise(args):
+    """
+    Parse the noise parameters into noise spectra and per pixel noise
+    levels.  Zero knee multipole produces a white noise spectrum.
+    """
+
+    if args.lmax:
+        lmax = args.lmax
+    else:
+        lmax = 2*args.nside
+
+    noise_cl = np.zeros([4, lmax+1]) # TT, EE, BB and TE
+
+    ell = np.arange(lmax+1)
+    norm = 1e-6 * arcmin
+
+    # TT noise spectrum
+
+    sigma = args.noise_tt_sigma * norm
+    if args.noise_tt_knee:
+        knee = 1 / args.noise_tt_knee
+    else:
+        knee = 0
+    slope = args.noise_tt_slope
+    if knee:
+        noise_cl[0][1:] = (1 + (ell[1:]*knee)**slope) * sigma**2
+    else:
+        noise_cl[0][1:] = sigma**2
+    sigma_tt = sigma
+
+    # EE noise spectrum (use TT parameters when EE are absent)
+
+    if args.noise_ee_sigma:
+        sigma = args.noise_ee_sigma * norm
+    if args.noise_ee_knee:
+        knee = 1 / args.noise_ee_knee
+    if args.noise_ee_slope:
+        slope = args.noise_ee_slope
+    if knee:
+        noise_cl[1][2:] = (1 + (ell[2:]*knee)**slope) * sigma**2
+    else:
+        noise_cl[1][2:] = sigma**2
+    sigma_ee = sigma
+
+    # BB noise spectrum (use EE parameters when BB are absent)
+
+    if args.noise_bb_sigma:
+        sigma = args.noise_bb_sigma * norm
+    if args.noise_bb_knee:
+        knee = 1 / args.noise_bb_knee
+    if args.noise_bb_slope:
+        slope = args.noise_bb_slope
+    if knee:
+        noise_cl[2][2:] = (1 + (ell[2:]*knee)**slope) * sigma**2
+    else:
+        noise_cl[2][2:] = sigma**2
+    sigma_bb = sigma
+
+    if args.debug:
+        fn = args.output + '_noise_cl.fits'
+        if os.path.isfile(fn):
+            os.remove(fn)
+        print('Writing N_ell to', fn)
+        hp.write_cl(fn, list(noise_cl))
+
+    # Split the noise into white and 1/f parts.  White noise is best
+    # simulated in the pixel domain.
+
+    nside = args.nside
+    npix = 12*nside**2
+    wpix = np.sqrt(4*np.pi/npix)
+
+    noise_cl[0][1:] -= sigma_tt**2
+    sigma_tt /= wpix
+
+    sigma_pol = min(sigma_ee, sigma_bb)
+    noise_cl[1][2:] -= sigma_pol**2
+    noise_cl[2][2:] -= sigma_pol**2
+    sigma_pol /= wpix
+
+    return noise_cl, sigma_tt, sigma_pol
 
 
 def coordsys2euler_zyz(coord_in, coord_out):
@@ -207,7 +330,7 @@ def read_foreground(args):
     fg_map = np.array(hp.read_map(fn, range(3), verbose=False))
 
     if args.fg_scale:
-        fg_map[fg_map != hp.UNSEEN] *= fg_scale
+        fg_map[fg_map != hp.UNSEEN] *= args.fg_scale
 
     if args.lmax:
         lmax = args.lmax
@@ -223,9 +346,9 @@ def read_foreground(args):
     pixwin = np.array(hp.pixwin(nside, pol=True))
     pixwin[pixwin != 0] = 1 / pixwin[pixwin != 0]
 
-    fg[0] = hp.almxfl(fg[0], pixwin[0], inplace=False)
-    fg[1] = hp.almxfl(fg[1], pixwin[1], inplace=False)
-    fg[2] = hp.almxfl(fg[2], pixwin[1], inplace=False)
+    hp.almxfl(fg[0], pixwin[0], inplace=True)
+    hp.almxfl(fg[1], pixwin[1], inplace=True)
+    hp.almxfl(fg[2], pixwin[1], inplace=True)
 
     if args.fg_coord != args.output_coord:
         psi, theta, phi = coordsys2euler_zyz(args.fg_coord, args.output_coord)
@@ -258,10 +381,17 @@ def smooth_signal(args, cmb_alm, cmb_lmax, fg_alm, fg_lmax):
                 i2 = hp.Alm.getidx(fg_lmax, ell, m)
                 alm[:, i0] += fg_alm[:, i2]
 
-    total = hp.alm2map(alm, args.nside, pixwin=True, verbose=False,
-                       fwhm=args.fwhm*arcmin, pol=True, inplace=True)
+    signal = hp.alm2map(list(alm), args.nside, pixwin=True, verbose=False,
+                        fwhm=args.fwhm*arcmin, pol=True, inplace=True)
 
-    return total
+    if args.debug:
+        fn = args.output + '_signal_map.fits.gz'
+        if os.path.isfile(fn):
+            os.remove(fn)
+        print('Writing signal map to', fn)
+        hp.write_map(fn, signal, coord=args.output_coord)
+
+    return signal
 
 
 def save_map(args, total_map):
@@ -269,14 +399,61 @@ def save_map(args, total_map):
     Save the co-added map as a zip-compressed full sky FITS file.
     """
 
-    fn = args.output_map
-    if not fn.endswith('.gz'):
-        fn += '.gz'
+    fn = args.output + '_map.fits.gz'
 
-    try:
-        hp.write_map(fn, total_map, coord=args.output_coord)
-    except:
-        hp.write_map(fn, total_map, coord=args.output_coord, overwrite=True)
+    if os.path.isfile(fn):
+        os.remove(fn)
+
+    hp.write_map(fn, total_map, coord=args.output_coord)
+
+    return
+
+
+def simulate_noise(args, noise_cl, sigma_tt, sigma_pol):
+    """
+    Simulate a noise map using the N_ell and white noise levels.
+    We will assume diagonal white noise covariance matrices for now.
+    """
+
+    if args.lmax:
+        lmax = args.lmax
+    else:
+        lmax = 2*args.nside
+
+    # Simulate correlated noise modes in spherical harmonics
+
+    nalm = hp.Alm.getsize(lmax)
+    noise_alm = np.zeros([3, nalm], dtype=np.complex)
+
+    noise_alm[0][1:] = np.random.randn(nalm-1) + np.random.randn(nalm-1)*1j
+    noise_alm[1][2:] = np.random.randn(nalm-2) + np.random.randn(nalm-2)*1j
+    noise_alm[2][2:] = np.random.randn(nalm-2) + np.random.randn(nalm-2)*1j
+
+    norm = 1 / np.sqrt(2)
+    hp.almxfl(noise_alm[0], noise_cl[0]**.5*norm, inplace=True)
+    hp.almxfl(noise_alm[1], noise_cl[1]**.5*norm, inplace=True)
+    hp.almxfl(noise_alm[2], noise_cl[2]**.5*norm, inplace=True)
+
+    # Transform to pixel domain
+
+    noise_map = np.array(hp.alm2map(list(noise_alm), args.nside, pixwin=False,
+                                    verbose=False, pol=True, inplace=True))
+
+    # Add white noise in pixel space
+
+    npix = 12*args.nside**2
+    noise_map[0] += np.random.randn(npix)*sigma_tt
+    noise_map[1] += np.random.randn(npix)*sigma_pol
+    noise_map[2] += np.random.randn(npix)*sigma_pol
+
+    if args.debug:
+        fn = args.output + '_noise_map.fits.gz'
+        if os.path.isfile(fn):
+            os.remove(fn)
+        print('Writing noise map to', fn)
+        hp.write_map(fn, noise_map, coord=args.output_coord)
+
+    return noise_map
 
 
 def main():
@@ -289,9 +466,11 @@ def main():
 
     sky_map = smooth_signal(args, cmb_alm, cmb_lmax, fg_alm, fg_lmax)
 
-    #noise_map = simulate_noise(args)
+    noise_cl, sigma_tt, sigma_pol = read_noise(args)
 
-    #total_map = sky_map + noise_map
+    noise_map = simulate_noise(args, noise_cl, sigma_tt, sigma_pol)
+
+    total_map = sky_map + noise_map
 
     save_map(args, sky_map)
 
