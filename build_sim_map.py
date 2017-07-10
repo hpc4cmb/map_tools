@@ -154,7 +154,7 @@ def apply_hits(args, sky_map, noise_map, header):
         hit[np.isnan(hit)] = 0
     hitheader.append(('hit', fn, 'Relative hit map'))
 
-    nside_hit = hp.npix2nside(hit.size)
+    nside_hit = hp.get_nside(hit)
     hitheader.append(('hitnside', nside_hit, 'Relative hit map Nside'))
     hitheader.append(('hitcoord', args.hit_coord, 'Relative hit map coord'))
 
@@ -203,7 +203,7 @@ def apply_hits(args, sky_map, noise_map, header):
 
 
 def add_maps(args, sky_map, noise_map, header):
-    
+
     print('Adding maps')
 
     if np.atleast_1d(sky_map).size == 1:
@@ -307,8 +307,7 @@ def read_noise(args, header):
     # simulated in the pixel domain.
 
     nside = args.nside
-    npix = hp.nside2npix(nside)
-    wpix = np.sqrt(4*np.pi/npix)
+    wpix = np.sqrt(hp.nside2pixarea(nside))
 
     noise_cl[0][1:] -= sigma_tt**2
     sigma_tt /= wpix
@@ -487,7 +486,7 @@ def read_foreground(args, header):
         fg_tot[fg_tot != hp.UNSEEN] *= args.fg_scale
         fgheader.append(('fgscale', args.fg_scale, 'Foreground scale'))
 
-    nside = hp.npix2nside(fg_tot[0].size)
+    nside = hp.get_nside(fg_tot)
     print('  nside =', nside)
     fgheader.append(('fgnside', nside, 'Foreground Nside'))
     fgheader.append(('fgcoord', args.fg_coord, 'Foreground coord'))
@@ -541,10 +540,23 @@ def build_highpass(args, cmb_lmax, fg_lmax, header):
     else:
         lmax = max(cmb_lmax, fg_lmax)
 
-    highpass = np.ones(lmax+1)
-    highpass[:args.lmin] = 0
-
-    hpheader.append(('lmin', args.lmin, 'highpass lmin'))
+    if True:
+        # Crude step filter
+        highpass = np.ones(lmax+1)
+        highpass[:args.lmin] = 0
+        hpheader.append(('lmin', args.lmin, 'highpass lmin'))
+    else:
+        # Cosine filter
+        ell1 = 2
+        ell2 = args.lmin * 2
+        ell = np.arange(lmax+1)
+        ind = np.logical_and(ell>=ell1, ell<=ell2)
+        highpass = np.ones(lmax+1)
+        highpass[:ell1] = 0
+        highpass[ind] = (1 - np.cos((ell[ind]-ell1)*np.pi/(ell2-ell1))) / 2
+        hpheader.append(('lmin', args.lmin, 'highpass lmin'))
+        hpheader.append(('ell1', args.lmin, 'highpass ell1'))
+        hpheader.append(('ell2', args.lmin, 'highpass ell2'))
 
     if args.debug:
         fn = args.output + '_highpass_filter.fits'
