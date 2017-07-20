@@ -95,6 +95,9 @@ def parse_arguments(header):
     parser.add_argument('--lmin', required=False, type=np.int,
                         help='Highpass filter scale')
 
+    parser.add_argument('--highpass_step', required=False, type=np.int,
+                        help='Use step-shape highpass instead of cosine')
+
     parser.add_argument('--lmax', required=False, type=np.int,
                         help='Maximum ell to consider')
 
@@ -540,7 +543,7 @@ def build_highpass(args, cmb_lmax, fg_lmax, header):
     else:
         lmax = max(cmb_lmax, fg_lmax)
 
-    if True:
+    if args.highpass_step:
         # Crude step filter
         highpass = np.ones(lmax+1)
         highpass[:args.lmin] = 0
