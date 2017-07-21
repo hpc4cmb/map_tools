@@ -73,8 +73,8 @@ def parse_arguments(header):
                         help='hitmap coordinate system')
 
     parser.add_argument('--cmb', required=False, action='append',
-                        help='CMB Alm expansion file '
-                        '(can be defined multiple times)')
+                        help='CMB Alm expansion file or <file>,<scale> tuple'
+                        ' (can be defined multiple times)')
 
     parser.add_argument('--cmb_scale', required=False, type=np.float,
                         help='CMB multiplier to apply')
@@ -406,10 +406,20 @@ def read_cmb(args, header):
     cmbheader = []
 
     for i, fn in enumerate(args.cmb):
+        if ',' in fn:
+            fn, scale = fn.split(',')
+            scale = np.float(scale)
+            if scale == 0:
+                continue
+        else:
+            scale = None
         fn.format(args.realization)
         if not os.path.isfile(fn):
             raise RuntimeError('CMB file not found: {}'.format(fn))
         cmb, lmax = read_alm(fn, zero_dipole=True)
+        if scale is not None:
+            cmb *= scale
+            cmbheader.append(('cmb{}scl'.format(i), scale, 'Separate CMB scale'))
         cmbs.append(cmb)
         lmaxs.append(lmax)
         cmbheader.append(('cmb{}'.format(i), fn, 'CMB a_lm file'))
@@ -495,14 +505,14 @@ def read_foreground(args, header):
     fgheader.append(('fgcoord', args.fg_coord, 'Foreground coord'))
 
     if args.lmax:
-        lmax = args.lmax
+        lmax_fg = min(args.lmax, 3*nside)
     else:
-        lmax = 2*nside
-    fgheader.append(('fglmax', lmax, 'Foreground a_lm lmax'))
+        lmax_fg = 2*nside
+    fgheader.append(('fglmax', lmax_fg, 'Foreground a_lm lmax'))
 
-    print('  Expanding foregrounds in spherical harmonics. lmax =', lmax)
+    print('  Expanding foregrounds in spherical harmonics. lmax =', lmax_fg)
 
-    fg = hp.map2alm(fg_tot, lmax=lmax, pol=True, iter=0)
+    fg = hp.map2alm(fg_tot, lmax=lmax_fg, pol=True, iter=0)
     fg = np.array(fg)
 
     # Invert and deconvolve the pixel window function
@@ -523,7 +533,7 @@ def read_foreground(args, header):
 
     header += fgheader
 
-    return fg, lmax
+    return fg, lmax_fg
 
 
 def build_highpass(args, cmb_lmax, fg_lmax, header):
