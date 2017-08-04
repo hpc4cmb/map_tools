@@ -4,21 +4,29 @@
 # All rights reserved.  Use of this source code is governed by
 # a BSD-style license that can be found in the LICENSE file.
 
+"""build_sim_map.py is a script to build simulated maps.
+"""
+
 import os
-import sys
 import argparse
 
 import healpy as hp
 import numpy as np
-from scipy.constants import degree, arcmin, arcsec
+from scipy.constants import arcmin
 
 
 def parse_arguments(header):
     """
     Parse the command line arguments.  Arguments may be entered in a
     parameter file identified from the prefix "@".
-    """
 
+    Args:
+        header (list): List to append entries to the FITS headers.
+
+    Returns:
+        args: Parsed arguments as an object.
+
+    """
     parser = argparse.ArgumentParser(
         description='Synthesize an observed sky map',
         fromfile_prefix_chars='@')
@@ -40,7 +48,7 @@ def parse_arguments(header):
                         help='TT white noise level [uK-arcmin]')
 
     parser.add_argument('--noise_tt_knee', required=False, type=np.float,
-                        help='TT noise knee multipole')
+                        default=0, help='TT noise knee multipole')
 
     parser.add_argument('--noise_tt_slope', required=False, type=np.float,
                         help='TT noise slope')
@@ -136,28 +144,29 @@ def parse_arguments(header):
     return args
 
 
-def apply_hits(args, sky_map, noise_map, header):
-
+def read_hits(args):
+    """Read the relative hit map.
+    """
     if not args.hit:
-        return sky_map, noise_map
+        return None, None
 
     print('Applying hit map')
 
     hitheader = []
 
-    fn = args.hit
-    if not os.path.isfile(fn):
-        raise RuntimeError('Hit file not found: {}'.format(fn))
-    print('  Reading', fn)
-    hit = hp.read_map(fn, dtype=np.float)
-    hit[hit == hp.UNSEEN] = 0
-    nnan = np.sum(np.isnan(hit))
+    fname = args.hit
+    if not os.path.isfile(fname):
+        raise RuntimeError('Hit file not found: {}'.format(fname))
+    print('  Reading', fname)
+    hit_map = hp.read_map(fname, dtype=np.float)
+    hit_map[hit_map == hp.UNSEEN] = 0
+    nnan = np.sum(np.isnan(hit_map))
     if nnan != 0:
-        print('WARNING: setting {} NANs in {} to zero.'.format(nnan, fn))
-        hit[np.isnan(hit)] = 0
-    hitheader.append(('hit', fn, 'Relative hit map'))
+        print('WARNING: setting {} NANs in {} to zero.'.format(nnan, fname))
+        hit_map[np.isnan(hit_map)] = 0
+    hitheader.append(('hit', fname, 'Relative hit map'))
 
-    nside_hit = hp.get_nside(hit)
+    nside_hit = hp.get_nside(hit_map)
     hitheader.append(('hitnside', nside_hit, 'Relative hit map Nside'))
     hitheader.append(('hitcoord', args.hit_coord, 'Relative hit map coord'))
 
@@ -165,37 +174,47 @@ def apply_hits(args, sky_map, noise_map, header):
     if args.hit_coord != args.output_coord:
         print('  Rotating {} -> {}'.format(args.hit_coord, args.output_coord))
         lmax_hit = 2*nside_hit
-        hit_alm = hp.map2alm(hit, lmax=lmax_hit, iter=0)
+        hit_alm = hp.map2alm(hit_map, lmax=lmax_hit, iter=0)
         psi, theta, phi = coordsys2euler_zyz(args.hit_coord, args.output_coord)
         hp.rotate_alm(hit_alm, psi, theta, phi)
-        hit = hp.alm2map(hit_alm, args.nside, pixwin=False, verbose=False)
-        hit[hit < 1e-3] = 0
+        hit_map = hp.alm2map(hit_alm, args.nside, pixwin=False, verbose=False)
+        hit_map[hit_map < 1e-3] = 0
         modified = True
     elif nside_hit != args.nside:
         print('  UDgrading {} -> {}', nside_hit, args.nside)
-        hit = hp.ud_grade(hit, args.nside)
+        hit_map = hp.ud_grade(hit_map, args.nside)
         modified = True
 
     if args.debug and modified:
-        fn = args.output + '_hit_map.fits.gz'
-        if os.path.isfile(fn):
-            os.remove(fn)
-        print('  Writing hit map to', fn)
-        hp.write_map(fn, hit, coord=args.output_coord, extra_header=hitheader)
+        fname = args.output + '_hit_map.fits.gz'
+        if os.path.isfile(fname):
+            os.remove(fname)
+        print('  Writing hit map to', fname)
+        hp.write_map(fname, hit_map, coord=args.output_coord,
+                     extra_header=hitheader)
+
+    return hit_map, hitheader
+
+
+def apply_hits(hit_map, hitheader, sky_map, noise_map, header):
+    """Apply the relative hit map to sky.
+    """
+    if hit_map is None:
+        return sky_map, noise_map
 
     if np.atleast_1d(sky_map).size != 1:
-        unseen = hit == 0
+        unseen = hit_map == 0
         sky_map[0][unseen] = hp.UNSEEN
         sky_map[1][unseen] = hp.UNSEEN
         sky_map[2][unseen] = hp.UNSEEN
 
     if np.atleast_1d(noise_map).size != 1:
-        seen = hit != 0
-        scale = 1 / np.sqrt(hit[seen])
+        seen = hit_map != 0
+        scale = 1 / np.sqrt(hit_map[seen])
         noise_map[0][seen] *= scale
         noise_map[1][seen] *= scale
         noise_map[2][seen] *= scale
-        unseen = hit == 0
+        unseen = hit_map == 0
         noise_map[0][unseen] = hp.UNSEEN
         noise_map[1][unseen] = hp.UNSEEN
         noise_map[2][unseen] = hp.UNSEEN
@@ -205,7 +224,9 @@ def apply_hits(args, sky_map, noise_map, header):
     return sky_map, noise_map
 
 
-def add_maps(args, sky_map, noise_map, header):
+def add_maps(sky_map, noise_map):
+    """Check the inputs and return a sum of sky and noise.
+    """
 
     print('Adding maps')
 
@@ -224,14 +245,15 @@ def add_maps(args, sky_map, noise_map, header):
     return total_map
 
 
-def read_noise(args, header):
-    """
+def read_noise(args):
+    """Read noise parameters.
+
     Parse the noise parameters into noise spectra and per pixel noise
     levels.  Zero knee multipole produces a white noise spectrum.
-    """
 
+    """
     if (not args.noise_tt_sigma and not args.noise_ee_sigma
-        and not args.noise_bb_sigma) or args.noise_scale == 0:
+            and not args.noise_bb_sigma) or args.noise_scale == 0:
         return None, 0, 0
 
     print('Parsing noise')
@@ -250,94 +272,85 @@ def read_noise(args, header):
 
     # TT noise spectrum
 
-    sigma = args.noise_tt_sigma * norm
-    if args.noise_tt_knee:
-        knee = args.noise_tt_knee
-    else:
-        knee = 0
+    sigma = args.noise_tt_sigma
     slope = args.noise_tt_slope
-    if knee:
-        noise_cl[0][1:] = (1 + (ell[1:]/knee)**slope) * sigma**2
+    knee = args.noise_tt_knee
+    if knee == 0:
+        noise_cl[0][1:] = (sigma*norm)**2
     else:
-        noise_cl[0][1:] = sigma**2
-    sigma_tt = sigma
-    noiseheader.append(('ttsigma', sigma/norm, 'TT noise level [uK/arcmin]'))
+        noise_cl[0][1:] = (1+(ell[1:]/knee)**slope) * (sigma*norm)**2
+    sigmas = [sigma*norm]
+    knees = [knee]
+    noiseheader.append(('ttsigma', sigma, 'TT noise level [uK/arcmin]'))
     noiseheader.append(('ttknee', knee, 'TT noise knee'))
     noiseheader.append(('ttslope', slope, 'TT noise slope'))
 
-    # EE noise spectrum (use TT parameters when EE are absent)
+    # Amplify the TT noise for polarization
+    sigma *= np.sqrt(2)
 
-    if args.noise_ee_sigma:
-        sigma = args.noise_ee_sigma * norm
-    if args.noise_ee_knee is not None:
-        knee = args.noise_ee_knee
-    if args.noise_ee_slope:
-        slope = args.noise_ee_slope
-    if knee:
-        noise_cl[1][2:] = (1 + (ell[2:]/knee)**slope) * sigma**2
-    else:
-        noise_cl[1][2:] = sigma**2
-    sigma_ee = sigma
-    noiseheader.append(('eesigma', sigma/norm, 'EE noise level [uK/arcmin]'))
-    noiseheader.append(('eeknee', knee, 'EE noise knee'))
-    noiseheader.append(('eeslope', slope, 'EE noise slope'))
+    def update(args, attribute, default):
+        """Update the default value, if new is available.
+        """
+        value = getattr(args, attribute)
+        return default if value is None else value
 
-    # BB noise spectrum (use EE parameters when BB are absent)
+    # EE noise spectrum uses TT parameters when EE are absent
+    # BB noise spectrum uses EE parameters when BB are absent
 
-    if args.noise_bb_sigma:
-        sigma = args.noise_bb_sigma * norm
-    if args.noise_bb_knee is not None:
-        knee = args.noise_bb_knee
-    if args.noise_bb_slope:
-        slope = args.noise_bb_slope
-    if knee:
-        noise_cl[2][2:] = (1 + (ell[2:]/knee)**slope) * sigma**2
-    else:
-        noise_cl[2][2:] = sigma**2
-    sigma_bb = sigma
-    noiseheader.append(('bbsigma', sigma/norm, 'BB noise level [uK/arcmin]'))
-    noiseheader.append(('bbknee', knee, 'BB noise knee'))
-    noiseheader.append(('bbslope', slope, 'BB noise slope'))
+    for imode, mode in enumerate(['EE', 'BB']):
+        lmode = mode.lower()
+        sigma = update(args, 'noise_{}_sigma'.format(lmode), sigma)
+        knee = update(args, 'noise_{}_knee'.format(lmode), knee)
+        slope = update(args, 'noise_{}_slope'.format(lmode), slope)
+        if knee == 0:
+            noise_cl[1+imode][2:] = (sigma*norm)**2
+        else:
+            noise_cl[1+imode][2:] = (1+(ell[2:]/knee)**slope) * (sigma*norm)**2
+        sigmas.append(sigma*norm)
+        knees.append(knee)
+        noiseheader.append(
+            (lmode+'sigma', sigma, mode+' noise level [uK/arcmin]'))
+        noiseheader.append((lmode+'knee', knee, mode+' noise knee'))
+        noiseheader.append((lmode+'slope', slope, mode+' noise slope'))
 
     if args.debug:
-        fn = args.output + '_noise_cl.fits'
-        if os.path.isfile(fn):
-            os.remove(fn)
-        print('  Writing N_ell to', fn)
-        hp.write_cl(fn, list(noise_cl))
+        fname = args.output + '_noise_cl.fits'
+        if os.path.isfile(fname):
+            os.remove(fname)
+        print('  Writing N_ell to', fname)
+        hp.write_cl(fname, list(noise_cl))
 
     # Split the noise into white and 1/f parts.  White noise is best
     # simulated in the pixel domain.
 
-    nside = args.nside
-    wpix = np.sqrt(hp.nside2pixarea(nside))
-
-    noise_cl[0][1:] -= sigma_tt**2
-    sigma_tt /= wpix
-
-    sigma_pol = min(sigma_ee, sigma_bb)
-    noise_cl[1][2:] -= sigma_pol**2
-    noise_cl[2][2:] -= sigma_pol**2
-    sigma_pol /= wpix
-
-    if not args.noise_tt_knee and not args.noise_ee_knee \
-            and not args.noise_bb_knee:
+    wpix = np.sqrt(hp.nside2pixarea(args.nside))
+    sigma_tt = sigmas[0]
+    sigma_pol = np.amin(sigmas[1:])
+    if np.all(knees == 0) and (sigmas[1] == sigmas[2]):
         noise_cl = None
+    else:
+        noise_cl[0][1:] -= sigma_tt**2
+        noise_cl[1][2:] -= sigma_pol**2
+        noise_cl[2][2:] -= sigma_pol**2
+    sigma_tt /= wpix
+    sigma_pol /= wpix
 
     return noise_cl, sigma_tt, sigma_pol, noiseheader
 
 
 def coordsys2euler_zyz(coord_in, coord_out):
-    """
+    """Return the ZYZ Euler angles.
+
     Return the ZYZ Euler angles corresponding to a rotation between
     the two coordinate systems.  The angles can be used to rotate_alm.
+
+    Upcoming release of healpy will have this method included.
+
     """
-
     # Convert basis vectors
-
     xin, yin, zin = np.eye(3)
     rot = hp.rotator.Rotator(coord=[coord_in, coord_out])
-    xout, yout, zout = rot([xin, yin, zin]).T
+    xout, yout, zout = np.array(rot([xin, yin, zin])).T
 
     # Normalize
 
@@ -354,20 +367,20 @@ def coordsys2euler_zyz(coord_in, coord_out):
     return psi, theta, phi
 
 
-def read_alm(fn, zero_dipole=False):
-    """
-    Read polarized alm expansion and return the expansion and lmax.
-    Enforce that the expansions are full rank (lmax == mmax).
-    """
+def read_alm(fname, zero_dipole=False):
+    """Read polarized alm expansion and return the expansion and lmax.
 
+    Enforce that the expansions are full rank (lmax == mmax).
+
+    """
     alms = []
     lmax = None
-    print('  Reading', fn)
+    print('  Reading', fname)
     for hdu in [1, 2, 3]:
-        alm, mmax = hp.read_alm(fn, hdu=hdu, return_mmax=True)
+        alm, mmax = hp.read_alm(fname, hdu=hdu, return_mmax=True)
         lmax_temp = hp.Alm.getlmax(alm.size, mmax=mmax)
         if mmax != lmax_temp:
-            raise RuntimeError('mmax != lmax in {}[{}]'.format(fn, hdu))
+            raise RuntimeError('mmax != lmax in {}[{}]'.format(fname, hdu))
         if lmax is None:
             lmax = lmax_temp
         else:
@@ -381,18 +394,16 @@ def read_alm(fn, zero_dipole=False):
     if zero_dipole:
         print('  Removing TT monopole and dipole')
         for ell in range(2):
-            for m in range(ell+1):
-                i = hp.Alm.getidx(lmax, ell, m)
-                alms[0][i] = 0
+            for mmode in range(ell+1):
+                ind = hp.Alm.getidx(lmax, ell, mmode)
+                alms[0][ind] = 0
 
     return alms, lmax
 
 
 def read_cmb(args, header):
+    """Read (and co-add) the CMB alm expansion.
     """
-    Read (and co-add) the CMB alm expansion.
-    """
-
     if args.cmb_scale == 0:
         # No CMB required
         return 0, 0
@@ -405,24 +416,25 @@ def read_cmb(args, header):
     lmaxs = []
     cmbheader = []
 
-    for i, fn in enumerate(args.cmb):
-        if ',' in fn:
-            fn, scale = fn.split(',')
+    for i, fname in enumerate(args.cmb):
+        if ',' in fname:
+            fname, scale = fname.split(',')
             scale = np.float(scale)
             if scale == 0:
                 continue
         else:
             scale = None
-        fn.format(args.realization)
-        if not os.path.isfile(fn):
-            raise RuntimeError('CMB file not found: {}'.format(fn))
-        cmb, lmax = read_alm(fn, zero_dipole=True)
+        fname.format(args.realization)
+        if not os.path.isfile(fname):
+            raise RuntimeError('CMB file not found: {}'.format(fname))
+        cmb, lmax = read_alm(fname, zero_dipole=True)
         if scale is not None:
             cmb *= scale
-            cmbheader.append(('cmb{}scl'.format(i), scale, 'Separate CMB scale'))
+            cmbheader.append(
+                ('cmb{}scl'.format(i), scale, 'Separate CMB scale'))
         cmbs.append(cmb)
         lmaxs.append(lmax)
-        cmbheader.append(('cmb{}'.format(i), fn, 'CMB a_lm file'))
+        cmbheader.append(('cmb{}'.format(i), fname, 'CMB a_lm file'))
         cmbheader.append(('cmb{}lmax'.format(i), lmax, 'CMB a_lm lmax'))
 
     # Combine the expansions
@@ -442,12 +454,12 @@ def read_cmb(args, header):
     cmbtot = np.zeros([3, nalm], dtype=np.complex)
 
     for ell in range(lmaxtot+1):
-        for m in range(ell+1):
-            i0 = hp.Alm.getidx(lmaxtot, ell, m)
+        for mmode in range(ell+1):
+            ind1 = hp.Alm.getidx(lmaxtot, ell, mmode)
             for cmb, lmax in zip(cmbs, lmaxs):
                 if ell <= lmax:
-                    i1 = hp.Alm.getidx(lmax, ell, m)
-                    cmbtot[:, i0] += cmb[:, i1]
+                    ind2 = hp.Alm.getidx(lmax, ell, mmode)
+                    cmbtot[:, ind1] += cmb[:, ind2]
 
     if args.cmb_coord != args.output_coord:
         print('  Rotating {} -> {}'.format(args.cmb_coord, args.output_coord))
@@ -465,10 +477,8 @@ def read_cmb(args, header):
 
 
 def read_foreground(args, header):
+    """Read the foregrounds and expand in spherical harmonics.
     """
-    Read the foregrounds and expand in spherical harmonics.
-    """
-
     if args.fg_scale == 0:
         # No foregrounds required
         return 0, 0
@@ -477,29 +487,29 @@ def read_foreground(args, header):
 
     fgheader = []
 
-    fg_tot = None
-    for i, fn in enumerate(args.fg):
-        if not os.path.isfile(fn):
-            raise RuntimeError('Foreground file not found: {}'.format(fn))
-        print('  Reading', fn)
-        fg_map = np.array(hp.read_map(fn, range(3), verbose=False))
-        if fg_tot is None:
-            fg_tot = fg_map
+    fg_map = None
+    for i, fname in enumerate(args.fg):
+        if not os.path.isfile(fname):
+            raise RuntimeError('Foreground file not found: {}'.format(fname))
+        print('  Reading', fname)
+        fg_map_add = np.array(hp.read_map(fname, range(3), verbose=False))
+        if fg_map is None:
+            fg_map = fg_map_add
         else:
-            if fg_map.size != fg_tot.size:
+            if fg_map_add.size != fg_map.size:
                 raise RuntimeError('Foreground maps have different resolution.')
-            fg_tot += fg_map
-        fgheader.append(('fg{:02}'.format(i), fn, 'FG map file'))
+            fg_map += fg_map_add
+        fgheader.append(('fg{:02}'.format(i), fname, 'FG map file'))
 
-    if fg_tot is None:
+    if fg_map is None:
         return 0, 0
 
     if args.fg_scale and args.fg_scale != 1:
         print('  Scaling foreground by', args.fg_scale)
-        fg_tot[fg_tot != hp.UNSEEN] *= args.fg_scale
+        fg_map[fg_map != hp.UNSEEN] *= args.fg_scale
         fgheader.append(('fgscale', args.fg_scale, 'Foreground scale'))
 
-    nside = hp.get_nside(fg_tot)
+    nside = hp.get_nside(fg_map)
     print('  nside =', nside)
     fgheader.append(('fgnside', nside, 'Foreground Nside'))
     fgheader.append(('fgcoord', args.fg_coord, 'Foreground coord'))
@@ -512,8 +522,8 @@ def read_foreground(args, header):
 
     print('  Expanding foregrounds in spherical harmonics. lmax =', lmax_fg)
 
-    fg = hp.map2alm(fg_tot, lmax=lmax_fg, pol=True, iter=0)
-    fg = np.array(fg)
+    fg_alm = hp.map2alm(fg_map, lmax=lmax_fg, pol=True, iter=0)
+    fg_alm = np.array(fg_alm)
 
     # Invert and deconvolve the pixel window function
 
@@ -522,25 +532,26 @@ def read_foreground(args, header):
     pixwin = np.array(hp.pixwin(nside, pol=True))
     pixwin[pixwin != 0] = 1 / pixwin[pixwin != 0]
 
-    hp.almxfl(fg[0], pixwin[0], inplace=True)
-    hp.almxfl(fg[1], pixwin[1], inplace=True)
-    hp.almxfl(fg[2], pixwin[1], inplace=True)
+    hp.almxfl(fg_alm[0], pixwin[0], inplace=True)
+    hp.almxfl(fg_alm[1], pixwin[1], inplace=True)
+    hp.almxfl(fg_alm[2], pixwin[1], inplace=True)
 
     if args.fg_coord != args.output_coord:
         print('  Rotating {} -> {}'.format(args.fg_coord, args.output_coord))
         psi, theta, phi = coordsys2euler_zyz(args.fg_coord, args.output_coord)
-        hp.rotate_alm(fg, psi, theta, phi)
+        hp.rotate_alm(fg_alm, psi, theta, phi)
 
     header += fgheader
 
-    return fg, lmax_fg
+    return fg_alm, lmax_fg
 
 
 def build_highpass(args, cmb_lmax, fg_lmax, header):
-    """
-    Build a harmonic highpass filter to mimic effects of TOD filtering.
-    """
+    """Build a highpass filter.
 
+    Build a harmonic highpass filter to mimic effects of TOD filtering.
+
+    """
     if not args.lmin:
         return None
 
@@ -563,7 +574,7 @@ def build_highpass(args, cmb_lmax, fg_lmax, header):
         ell1 = 2
         ell2 = args.lmin * 2
         ell = np.arange(lmax+1)
-        ind = np.logical_and(ell>=ell1, ell<=ell2)
+        ind = np.logical_and(ell >= ell1, ell <= ell2)
         highpass = np.ones(lmax+1)
         highpass[:ell1] = 0
         highpass[ind] = (1 - np.cos((ell[ind]-ell1)*np.pi/(ell2-ell1))) / 2
@@ -572,11 +583,11 @@ def build_highpass(args, cmb_lmax, fg_lmax, header):
         hpheader.append(('ell2', args.lmin, 'highpass ell2'))
 
     if args.debug:
-        fn = args.output + '_highpass_filter.fits'
-        if os.path.isfile(fn):
-            os.remove(fn)
-        print('  Writing highpass filter to', fn)
-        hp.write_cl(fn, highpass)
+        fname = args.output + '_highpass_filter.fits'
+        if os.path.isfile(fname):
+            os.remove(fname)
+        print('  Writing highpass filter to', fname)
+        hp.write_cl(fname, highpass)
 
     header += hpheader
 
@@ -584,11 +595,12 @@ def build_highpass(args, cmb_lmax, fg_lmax, header):
 
 
 def smooth_signal(args, cmb_alm, cmb_lmax, fg_alm, fg_lmax, highpass, header):
-    """
+    """Apply Gaussian beam.
+
     Apply beam smoothing to the CMB and foreground expansions and return
     a co-added expansion.
-    """
 
+    """
     if cmb_lmax == 0 and fg_lmax == 0:
         return 0
 
@@ -605,14 +617,14 @@ def smooth_signal(args, cmb_alm, cmb_lmax, fg_alm, fg_lmax, highpass, header):
     alm = np.zeros([3, nalm], dtype=np.complex)
 
     for ell in range(lmax+1):
-        for m in range(ell+1):
-            i0 = hp.Alm.getidx(lmax, ell, m)
+        for mmode in range(ell+1):
+            ind0 = hp.Alm.getidx(lmax, ell, mmode)
             if ell <= cmb_lmax:
-                i1 = hp.Alm.getidx(cmb_lmax, ell, m)
-                alm[:, i0] += cmb_alm[:, i1]
+                ind1 = hp.Alm.getidx(cmb_lmax, ell, mmode)
+                alm[:, ind0] += cmb_alm[:, ind1]
             if ell <= fg_lmax:
-                i2 = hp.Alm.getidx(fg_lmax, ell, m)
-                alm[:, i0] += fg_alm[:, i2]
+                ind2 = hp.Alm.getidx(fg_lmax, ell, mmode)
+                alm[:, ind0] += fg_alm[:, ind2]
 
     if highpass is not None:
         print('  highpass filtering the signal')
@@ -621,49 +633,52 @@ def smooth_signal(args, cmb_alm, cmb_lmax, fg_alm, fg_lmax, highpass, header):
         hp.almxfl(alm[2], highpass, inplace=True)
 
     signal = np.array(hp.alm2map(
-            list(alm), args.nside, pixwin=True, verbose=False,
-            fwhm=args.fwhm*arcmin, pol=True))
+        list(alm), args.nside, pixwin=True, verbose=False,
+        fwhm=args.fwhm*arcmin, pol=True))
 
     header.append(('fwhm', args.fwhm, 'Beam width [arcmin]'))
 
     if args.debug:
-        fn = args.output + '_signal_map.fits.gz'
-        if os.path.isfile(fn):
-            os.remove(fn)
-        print('  Writing signal map to', fn)
-        hp.write_map(fn, signal, coord=args.output_coord, extra_header=header)
+        fname = args.output + '_signal_map.fits.gz'
+        if os.path.isfile(fname):
+            os.remove(fname)
+        print('  Writing signal map to', fname)
+        hp.write_map(fname, signal, coord=args.output_coord,
+                     extra_header=header)
 
     return signal
 
 
 def save_map(args, total_map, header):
-    """
-    Save the co-added map as a zip-compressed full sky FITS file.
-    """
+    """Save map to FITS file.
 
+    Save the co-added map as a zip-compressed full sky FITS file.
+
+    """
     if np.atleast_1d(total_map).size == 1:
         print('\nWARNING: total map is empty. Nothing written.\n')
         return
 
-    fn = args.output + '_map.fits.gz'
+    fname = args.output + '_map.fits.gz'
 
-    if os.path.isfile(fn):
-        os.remove(fn)
+    if os.path.isfile(fname):
+        os.remove(fname)
 
-    print('Saving final map to', fn)
+    print('Saving final map to', fname)
 
-    hp.write_map(fn, total_map, coord=args.output_coord, extra_header=header)
+    hp.write_map(fname, total_map, coord=args.output_coord, extra_header=header)
 
     return
 
 
 def simulate_noise(args, noise_cl, sigma_tt, sigma_pol, highpass,
                    header, noiseheader):
-    """
+    """Simulate noise.
+
     Simulate a noise map using the N_ell and white noise levels.
     We will assume diagonal white noise covariance matrices for now.
-    """
 
+    """
     if args.noise_scale == 0:
         return 0
 
@@ -710,8 +725,8 @@ def simulate_noise(args, noise_cl, sigma_tt, sigma_pol, highpass,
         # Transform to pixel domain
 
         noise_map = np.array(hp.alm2map(
-                list(noise_alm), args.nside, pixwin=False,
-                verbose=False, pol=True, inplace=True))
+            list(noise_alm), args.nside, pixwin=False,
+            verbose=False, pol=True, inplace=True))
     else:
         if not sigma_tt and not sigma_pol:
             return 0
@@ -732,11 +747,11 @@ def simulate_noise(args, noise_cl, sigma_tt, sigma_pol, highpass,
         noiseheader.append(('noisescl', args.noise_scale, 'Noise scale'))
 
     if args.debug:
-        fn = args.output + '_noise_map.fits.gz'
-        if os.path.isfile(fn):
-            os.remove(fn)
-        print('  Writing noise map to', fn)
-        hp.write_map(fn, noise_map, coord=args.output_coord,
+        fname = args.output + '_noise_map.fits.gz'
+        if os.path.isfile(fname):
+            os.remove(fname)
+        print('  Writing noise map to', fname)
+        hp.write_map(fname, noise_map, coord=args.output_coord,
                      extra_header=noiseheader)
 
     header += noiseheader
@@ -745,7 +760,8 @@ def simulate_noise(args, noise_cl, sigma_tt, sigma_pol, highpass,
 
 
 def main():
-
+    """main method.
+    """
     header = []
 
     args = parse_arguments(header)
@@ -759,14 +775,17 @@ def main():
     sky_map = smooth_signal(args, cmb_alm, cmb_lmax, fg_alm, fg_lmax,
                             highpass, header)
 
-    noise_cl, sigma_tt, sigma_pol, noiseheader = read_noise(args, header)
+    noise_cl, sigma_tt, sigma_pol, noiseheader = read_noise(args)
 
     noise_map = simulate_noise(args, noise_cl, sigma_tt, sigma_pol,
                                highpass, header, noiseheader)
 
-    sky_map, noise_map = apply_hits(args, sky_map, noise_map, header)
+    hit_map, hit_header = read_hits(args)
 
-    total_map = add_maps(args, sky_map, noise_map, header)
+    sky_map, noise_map = apply_hits(hit_map, hit_header,
+                                    sky_map, noise_map, header)
+
+    total_map = add_maps(sky_map, noise_map)
 
     save_map(args, total_map, header)
 
