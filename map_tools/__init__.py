@@ -9,4 +9,5 @@ __all__ = ['plug_holes']
 
 from ._version import __version__
 from .plug_holes import plug_holes
+import ispice
 
